@@ -28,6 +28,7 @@ static ULONGLONG started_at = 0;
 static ULONGLONG last_tick = 0;
 static ULONGLONG last_spawn = 0;
 static int finished = 0;
+static void draw_centered(HDC dc, const wchar_t *text, RECT r, UINT flags);
 static int origin_closed = 0;
 static HWND main_hwnd = NULL;
 
@@ -236,6 +237,13 @@ static void update_scene(HWND hwnd)
     if (elapsed >= RUN_SECONDS) {
         finished = 1;
         KillTimer(hwnd, TIMER_ID);
+        for (int i = 0; i < card_count; ++i) {
+            if (cards[i].hwnd) {
+                DestroyWindow(cards[i].hwnd);
+                cards[i].hwnd = NULL;
+            }
+            cards[i].alive = 0;
+        }
         InvalidateRect(hwnd, NULL, TRUE);
         return;
     }
