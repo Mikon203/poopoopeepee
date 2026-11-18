@@ -10,7 +10,6 @@
 #include <wingdi.h>
 #include <stdint.h>
 
-// Fallback definitions for screen orientation constants if older SDK headers omit them
 #ifndef DMDO_0
 #define DMDO_0 0
 #define DMDO_90 1
@@ -18,21 +17,21 @@
 #define DMDO_270 3
 #endif
 
-#define TRAIL_MAX 8
+#define TRAIL_MAX 6
 #define TIMER_PHYSICS 1
 
 typedef struct {
     HWND hwnd;
-    double x, y;
 } TrailNode;
 
 static TrailNode trail[TRAIL_MAX];
 static int trail_index = 0;
 static HWND main_hwnd = NULL;
-static double pos_x = 100.0, pos_y = 100.0;
+static double pos_x = 150.0, pos_y = 100.0;
 static double vel_x = 6.0, vel_y = 0.0;
-static const double gravity = 0.6;
-static const double bounce_damping = -0.8;
+static const double gravity = 0.55;
+static const double bounce_damping = -0.78;
+static int tick_counter = 0;
 
 static void flip_screen(int orientation) {
 #ifndef __WINE__
@@ -59,7 +58,7 @@ static void flip_screen(int orientation) {
 #endif
 }
 
-static LRESULT CALLBACK TrailWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+static LRESULT CALLBACK PrankWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
     if (msg == WM_CLOSE || (msg == WM_KEYDOWN && wp == VK_ESCAPE)) {
         flip_screen(DMDO_0);
@@ -75,12 +74,14 @@ static VOID CALLBACK PhysicsTimerProc(HWND hwnd, UINT msg, UINT_PTR idEvent, DWO
 
     int screen_w = GetSystemMetrics(SM_CXSCREEN);
     int screen_h = GetSystemMetrics(SM_CYSCREEN);
-    int win_w = 280, win_h = 100;
+    int win_w = 260, win_h = 90;
 
+    // Apply gravity physics
     vel_y += gravity;
     pos_x += vel_x;
     pos_y += vel_y;
 
+    // Floor and ceiling collisions
     if (pos_y >= (screen_h - win_h)) {
         pos_y = (double)(screen_h - win_h);
         vel_y *= bounce_damping;
@@ -90,35 +91,48 @@ static VOID CALLBACK PhysicsTimerProc(HWND hwnd, UINT msg, UINT_PTR idEvent, DWO
         vel_y *= bounce_damping;
     }
 
+    // Wall collisions
     if (pos_x >= (screen_w - win_w) || pos_x <= 0) {
         vel_x *= -1.0;
         if (pos_x < 0) pos_x = 0;
         if (pos_x > (screen_w - win_w)) pos_x = (double)(screen_w - win_w);
     }
 
+    // Update main window position
     SetWindowPos(main_hwnd, NULL, (int)pos_x, (int)pos_y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
 
-    HINSTANCE hInstance = (HINSTANCE)GetWindowLongPtrW(main_hwnd, GWLP_HINSTANCE);
-    HWND ghost = CreateWindowExW(
-        WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED,
-        L"TrailPrankClass",
-        L"Ghost",
-        WS_POPUP | WS_VISIBLE,
-        (int)pos_x, (int)pos_y,
-        win_w, win_h,
-        NULL, NULL, hInstance, NULL
-    );
-    
-    SetLayeredWindowAttributes(ghost, 0, 150, LWA_ALPHA);
+    // Every few ticks, spawn a real trailing box window
+    tick_counter++;
+    if (tick_counter >= 4) {
+        tick_counter = 0;
+        HINSTANCE hInstance = (HINSTANCE)GetWindowLongPtrW(main_hwnd, GWLP_HINSTANCE);
+        
+        HWND ghost = CreateWindowExW(
+            WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+            L"RealBoxClass",
+            L"Chill Windows — Trail",
+            WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
+            (int)pos_x, (int)pos_y,
+            win_w, win_h,
+            NULL, NULL, hInstance, NULL
+        );
 
-    if (trail[trail_index].hwnd && IsWindow(trail[trail_index].hwnd)) {
-        DestroyWindow(trail[trail_index].hwnd);
+        if (ghost) {
+            CreateWindowExW(
+                0, L"STATIC", L"Leaving a trail of real boxes!",
+                WS_CHILD | WS_VISIBLE | SS_CENTER,
+                10, 20, 240, 30,
+                ghost, NULL, hInstance, NULL
+            );
+
+            // Destroy the oldest window in the trail queue to keep it moving
+            if (trail[trail_index].hwnd && IsWindow(trail[trail_index].hwnd)) {
+                DestroyWindow(trail[trail_index].hwnd);
+            }
+            trail[trail_index].hwnd = ghost;
+            trail_index = (trail_index + 1) % TRAIL_MAX;
+        }
     }
-    trail[trail_index].hwnd = ghost;
-    trail[trail_index].x = pos_x;
-    trail[trail_index].y = pos_y;
-    
-    trail_index = (trail_index + 1) % TRAIL_MAX;
 }
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine, int nCmdShow)
@@ -126,31 +140,32 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
     (void)hPrevInstance; (void)pCmdLine; (void)nCmdShow;
 
     WNDCLASSW wc = {0};
-    wc.lpfnWndProc = TrailWndProc;
+    wc.lpfnWndProc = PrankWndProc;
     wc.hInstance = hInstance;
     wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
-    wc.hbrBackground = (HBRUSH)(COLOR_HIGHLIGHT + 1);
-    wc.lpszClassName = L"TrailPrankClass";
+    wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+    wc.lpszClassName = L"RealBoxClass";
     if (!RegisterClassW(&wc)) return 1;
 
+    // Flip screen display on startup
     flip_screen(DMDO_180);
 
     main_hwnd = CreateWindowExW(
         WS_EX_TOPMOST,
-        L"TrailPrankClass",
+        L"RealBoxClass",
         L"Chill Windows — Gravity Trail",
         WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
         (int)pos_x, (int)pos_y,
-        280, 100,
+        260, 90,
         NULL, NULL, hInstance, NULL
     );
 
     if (!main_hwnd) return 1;
 
     CreateWindowExW(
-        0, L"STATIC", L"Bouncing with gravity & trail!\nPress ESC to restore.",
+        0, L"STATIC", L"Bouncing with a real window trail!\nPress ESC to exit.",
         WS_CHILD | WS_VISIBLE | SS_CENTER,
-        10, 25, 260, 45,
+        10, 20, 240, 35,
         main_hwnd, NULL, hInstance, NULL
     );
 
@@ -163,5 +178,13 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
     }
 
     KillTimer(main_hwnd, TIMER_PHYSICS);
+    
+    // Clean up any remaining trail boxes on exit
+    for (int i = 0; i < TRAIL_MAX; ++i) {
+        if (trail[i].hwnd && IsWindow(trail[i].hwnd)) {
+            DestroyWindow(trail[i].hwnd);
+        }
+    }
+
     return 0;
 }
