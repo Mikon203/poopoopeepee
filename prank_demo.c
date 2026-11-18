@@ -4,10 +4,8 @@
 #include <windows.h>
 #include <stdint.h>
 
-#define APP_CLASS L"ChillWindowsHost"
-#define ALERT_COUNT 5
-#define TIMER_ID 1
-#define RUN_MILLISECONDS 45000
+#define ALERT_COUNT 6
+#define RUN_MILLISECONDS 30000
 
 typedef struct {
     HWND hwnd;
@@ -18,18 +16,46 @@ typedef struct {
     int slot;
 } DialogState;
 
-static HWND app_window = NULL;
 static DialogState dialogs[ALERT_COUNT];
 static ULONGLONG started_at = 0;
 static volatile LONG stopping = 0;
 static __declspec(thread) DialogState *thread_dialog = NULL;
 
+// Function to flip or reset the screen orientation
+static void flip_screen(int orientation) {
+    DEVMODEW dm = {0};
+    dm.dmSize = sizeof(dm);
+    if (EnumDisplaySettingsW(NULL, ENUM_CURRENT_SETTINGS, &dm)) {
+        if ((orientation == DMDO_90 || orientation == DMDO_270) && 
+            (dm.dmDisplayOrientation == DMDO_0 || dm.dmDisplayOrientation == DMDO_180)) {
+            DWORD temp = dm.dmPelsWidth;
+            dm.dmPelsWidth = dm.dmPelsHeight;
+            dm.dmPelsHeight = temp;
+        } else if ((orientation == DMDO_0 || orientation == DMDO_180) && 
+                   (dm.dmDisplayOrientation == DMDO_90 || dm.dmDisplayOrientation == DMDO_270)) {
+            DWORD temp = dm.dmPelsWidth;
+            dm.dmPelsWidth = dm.dmPelsHeight;
+            dm.dmPelsHeight = temp;
+        }
+        dm.dmDisplayOrientation = orientation;
+        dm.dmFields = DM_DISPLAYORIENTATION | DM_PELSWIDTH | DM_PELSHEIGHT;
+        ChangeDisplaySettingsExW(NULL, &dm, NULL, CDS_RESET, NULL);
+    }
+}
+
 static void close_all_alerts(void)
 {
+    if (InterlockedCompareExchange(&stopping, 1, 1) == 1) return;
     InterlockedExchange(&stopping, 1);
+    
+    // Immediately restore display back to normal
+    flip_screen(DMDO_0);
+
     for (int i = 0; i < ALERT_COUNT; ++i) {
         HWND dialog = dialogs[i].hwnd;
-        if (dialog) PostMessageW(dialog, WM_CLOSE, 0, 0);
+        if (dialog && IsWindow(dialog)) {
+            PostMessageW(dialog, WM_CLOSE, 0, 0);
+        }
     }
 }
 
@@ -43,8 +69,6 @@ static LRESULT CALLBACK moving_dialog_proc(HWND hwnd, UINT msg, WPARAM wp, LPARA
     if (msg == WM_NCDESTROY && state) {
         RemovePropW(hwnd, L"ChillWindowsDialogState");
         if (state->hwnd == hwnd) state->hwnd = NULL;
-        if (state->old_proc)
-            return CallWindowProcW(state->old_proc, hwnd, msg, wp, lp);
     }
     return state && state->old_proc
         ? CallWindowProcW(state->old_proc, hwnd, msg, wp, lp)
@@ -54,35 +78,32 @@ static LRESULT CALLBACK moving_dialog_proc(HWND hwnd, UINT msg, WPARAM wp, LPARA
 static DWORD WINAPI dialog_motion_worker(LPVOID parameter)
 {
     DialogState *state = (DialogState *)parameter;
+    
     while (!InterlockedCompareExchange(&stopping, 0, 0)) {
         HWND dialog = state->hwnd;
         if (!dialog || !IsWindow(dialog)) break;
 
-        HWND owner = GetWindow(dialog, GW_OWNER);
-        if (!owner) owner = app_window;
-        if (!owner || !IsWindow(owner)) break;
-
-        RECT bounds, wr;
-        GetClientRect(owner, &bounds);
-        POINT origin = { bounds.left, bounds.top };
-        ClientToScreen(owner, &origin);
+        RECT wr;
         GetWindowRect(dialog, &wr);
-        int ww = wr.right - wr.left, wh = wr.bottom - wr.top;
-        int max_x = bounds.right - ww;
-        int max_y = bounds.bottom - wh;
+        int ww = wr.right - wr.left;
+        int wh = wr.bottom - wr.top;
+        
+        int max_x = GetSystemMetrics(SM_CXSCREEN) - ww;
+        int max_y = GetSystemMetrics(SM_CYSCREEN) - wh;
         if (max_x < 0) max_x = 0;
         if (max_y < 0) max_y = 0;
 
         state->x += state->vx;
         state->y += state->vy;
-        if (state->x < 0) { state->x = 0; state->vx = 3.0; }
-        if (state->x > max_x) { state->x = max_x; state->vx = -3.0; }
-        if (state->y < 0) { state->y = 0; state->vy = 2.5; }
-        if (state->y > max_y) { state->y = max_y; state->vy = -2.5; }
+        
+        if (state->x < 0) { state->x = 0; state->vx = 4.5; }
+        if (state->x > max_x) { state->x = max_x; state->vx = -4.5; }
+        if (state->y < 0) { state->y = 0; state->vy = 3.8; }
+        if (state->y > max_y) { state->y = max_y; state->vy = -3.8; }
 
-        SetWindowPos(dialog, NULL, origin.x + (int)state->x, origin.y + (int)state->y,
+        SetWindowPos(dialog, NULL, (int)state->x, (int)state->y,
                      0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-        Sleep(30);
+        Sleep(15);
     }
     return 0;
 }
@@ -95,44 +116,30 @@ static LRESULT CALLBACK message_box_hook(int code, WPARAM wp, LPARAM lp)
         state->hwnd = hwnd;
         dialogs[state->slot].hwnd = hwnd;
 
-        /* Keep the native MessageBox recognizable as this app's joke. */
-        SetWindowTextW(hwnd, L"Chill Windows — goofy prompt");
+        SetWindowTextW(hwnd, L"Chill Windows — Prank Active");
         SetDlgItemTextW(hwnd, IDOK, L"What?");
-        SetDlgItemTextW(hwnd, IDCANCEL, L"OK!");
+        SetDlgItemTextW(hwnd, IDCANCEL, L"Stop!");
 
-        RECT bounds, wr;
-        GetClientRect(app_window, &bounds);
-        POINT origin = { bounds.left, bounds.top };
-        ClientToScreen(app_window, &origin);
+        RECT wr;
         GetWindowRect(hwnd, &wr);
-        int ww = wr.right - wr.left, wh = wr.bottom - wr.top;
-        int usable_w = bounds.right - ww;
-        int usable_h = bounds.bottom - wh;
-        if (usable_w < 0) usable_w = 0;
-        if (usable_h < 0) usable_h = 0;
-        state->x = (state->slot * 83) % (usable_w + 1);
-        state->y = (state->slot * 57) % (usable_h + 1);
-        state->vx = (state->slot % 2) ? -3.0 : 3.0;
-        state->vy = (state->slot % 2) ? 2.5 : -2.5;
+        int ww = wr.right - wr.left;
+        int wh = wr.bottom - wr.top;
+        int screen_w = GetSystemMetrics(SM_CXSCREEN) - ww;
+        int screen_h = GetSystemMetrics(SM_CYSCREEN) - wh;
+        if (screen_w < 0) screen_w = 0;
+        if (screen_h < 0) screen_h = 0;
+
+        // Spread out initial starting positions
+        state->x = (double)((state->slot * 200) % (screen_w > 0 ? screen_w : 1));
+        state->y = (double)((state->slot * 150) % (screen_h > 0 ? screen_h : 1));
+        state->vx = (state->slot % 2 == 0) ? 4.5 : -4.5;
+        state->vy = (state->slot % 2 == 0) ? 3.8 : -3.8;
 
         SetPropW(hwnd, L"ChillWindowsDialogState", state);
-        state->old_proc = (WNDPROC)SetWindowLongPtrW(hwnd, GWLP_WNDPROC,
-                                                     (LONG_PTR)moving_dialog_proc);
+        state->old_proc = (WNDPROC)SetWindowLongPtrW(hwnd, GWLP_WNDPROC, (LONG_PTR)moving_dialog_proc);
         state->worker = CreateThread(NULL, 0, dialog_motion_worker, state, 0, NULL);
-        SetWindowPos(hwnd, NULL, origin.x + (int)state->x, origin.y + (int)state->y,
-                     0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-    }
-    return CallNextHookEx(NULL, code, wp, lp);
-}
-
-static LRESULT CALLBACK message_filter_hook(int code, WPARAM wp, LPARAM lp)
-{
-    if (code == MSGF_DIALOGBOX) {
-        MSG *message = (MSG *)lp;
-        if (message && message->message == WM_KEYDOWN && message->wParam == VK_ESCAPE) {
-            close_all_alerts();
-            return 1;
-        }
+        
+        SetWindowPos(hwnd, NULL, (int)state->x, (int)state->y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
     }
     return CallNextHookEx(NULL, code, wp, lp);
 }
@@ -142,135 +149,61 @@ static DWORD WINAPI show_alert(LPVOID parameter)
     DialogState *state = (DialogState *)parameter;
     state->thread_id = GetCurrentThreadId();
     thread_dialog = state;
+    
     HHOOK hook = SetWindowsHookExW(WH_CBT, message_box_hook, NULL, state->thread_id);
     if (!hook) return 1;
-    HHOOK filter = SetWindowsHookExW(WH_MSGFILTER, message_filter_hook, NULL, state->thread_id);
-    if (!filter) {
-        UnhookWindowsHookEx(hook);
-        return 1;
-    }
 
     static const wchar_t *texts[] = {
-        L"Snack levels have reached a mathematically silly value.",
-        L"Error 404: Seriousness not found. Please try laughing.",
-        L"Your keyboard has requested a tiny vacation.",
-        L"Warning: excessive chill detected in this window.",
-        L"The computer misplaced its hat. It is looking under the desk."
+        L"Your screen decided to do a cartwheel.",
+        L"Error 404: Gravity temporarily unavailable.",
+        L"Too much chill detected on the primary display.",
+        L"This is completely harmless, but look at it go!",
+        L"Mikon203 special delivery: bouncy boxes!",
+        L"Press Escape or wait a bit to restore order."
     };
-    const wchar_t *body = texts[state->slot];
-    MessageBoxW(app_window, body, L"Chill Windows", MB_OKCANCEL | MB_ICONINFORMATION);
+    
+    MessageBoxW(NULL, texts[state->slot], L"Chill Windows", MB_OKCANCEL | MB_ICONINFORMATION);
 
     if (state->worker) {
-        WaitForSingleObject(state->worker, 2000);
+        WaitForSingleObject(state->worker, 1500);
         CloseHandle(state->worker);
         state->worker = NULL;
     }
     if (state->hwnd && IsWindow(state->hwnd)) {
         RemovePropW(state->hwnd, L"ChillWindowsDialogState");
-        if (state->old_proc)
-            SetWindowLongPtrW(state->hwnd, GWLP_WNDPROC, (LONG_PTR)state->old_proc);
         state->hwnd = NULL;
     }
     dialogs[state->slot].hwnd = NULL;
-    UnhookWindowsHookEx(filter);
     UnhookWindowsHookEx(hook);
     thread_dialog = NULL;
     return 0;
 }
 
-static void start_alerts(void)
+int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, PWSTR command_line, int show)
 {
+    (void)instance; (void)previous; (void)command_line; (void)show;
+
+    int choice = MessageBoxW(
+        NULL,
+        L"Motion Prank Warning: This program flips your display upside down and bounces windows across your entire desktop. Press Escape at any time to abort.\n\nReady to launch?",
+        L"Chill Windows — Warning",
+        MB_YESNO | MB_ICONWARNING
+    );
+    if (choice != IDYES) return 0;
+
+    started_at = GetTickCount64();
+
+    // Flip screen upside down immediately on start
+    flip_screen(DMDO_180);
+
+    // Spawn the bouncing alert threads
     for (int i = 0; i < ALERT_COUNT; ++i) {
         dialogs[i].slot = i;
         HANDLE thread = CreateThread(NULL, 0, show_alert, &dialogs[i], 0, NULL);
         if (thread) CloseHandle(thread);
     }
-}
 
-static LRESULT CALLBACK app_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
-{
-    switch (msg) {
-    case WM_CREATE:
-        app_window = hwnd;
-        started_at = GetTickCount64();
-        SetTimer(hwnd, TIMER_ID, 250, NULL);
-        return 0;
-    case WM_TIMER:
-        if (wp == TIMER_ID && GetTickCount64() - started_at >= RUN_MILLISECONDS) {
-            close_all_alerts();
-            DestroyWindow(hwnd);
-        }
-        return 0;
-    case WM_KEYDOWN:
-        if (wp == VK_ESCAPE) {
-            close_all_alerts();
-            DestroyWindow(hwnd);
-        }
-        return 0;
-    case WM_CLOSE:
-        close_all_alerts();
-        DestroyWindow(hwnd);
-        return 0;
-    case WM_PAINT: {
-        PAINTSTRUCT ps;
-        HDC dc = BeginPaint(hwnd, &ps);
-        RECT rc;
-        GetClientRect(hwnd, &rc);
-        SetBkMode(dc, TRANSPARENT);
-        SetTextColor(dc, RGB(35, 40, 50));
-        DrawTextW(dc,
-            L"Chill Windows\n\nFive native Windows message boxes are bouncing inside this window.\n"
-            L"Choose What? or OK! to dismiss one. Press Escape or close this window to stop all.",
-            -1, &rc, DT_CENTER | DT_VCENTER | DT_WORDBREAK);
-        EndPaint(hwnd, &ps);
-        return 0;
-    }
-    case WM_DESTROY:
-        KillTimer(hwnd, TIMER_ID);
-        app_window = NULL;
-        PostQuitMessage(0);
-        return 0;
-    }
-    return DefWindowProcW(hwnd, msg, wp, lp);
-}
-
-int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, PWSTR command_line, int show)
-{
-    (void)previous;
-    (void)command_line;
-
-    int choice = MessageBoxW(
-        NULL,
-        L"Epilepsy and motion warning: this app moves several dialog windows. It does not flash, capture the screen, or change display settings. Do not continue if motion may affect you. You can stop by pressing Escape or closing the app window.\n\nStart?",
-        L"Chill Windows — warning",
-        MB_YESNO | MB_ICONWARNING
-    );
-    if (choice != IDYES) return 0;
-
-    WNDCLASSW wc = {0};
-    wc.lpfnWndProc = app_proc;
-    wc.hInstance = instance;
-    wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
-    wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
-    wc.lpszClassName = APP_CLASS;
-    if (!RegisterClassW(&wc)) return 1;
-
-    HWND hwnd = CreateWindowExW(
-        0, APP_CLASS, L"Chill Windows",
-        WS_OVERLAPPEDWINDOW,
-        CW_USEDEFAULT, CW_USEDEFAULT, 820, 540,
-        NULL, NULL, instance, NULL
-    );
-    if (!hwnd) return 1;
-    ShowWindow(hwnd, show);
-    UpdateWindow(hwnd);
-    start_alerts();
-
-    MSG message;
-    while (GetMessageW(&message, NULL, 0, 0) > 0) {
-        TranslateMessage(&message);
-        DispatchMessageW(&message);
-    }
-    close_all_alerts();
-    return 0;
-}
+    // Run main timer loop
+    while (!InterlockedCompareExchange(&stopping, 0, 0)) {
+        if (GetTickCount64() - started_at >= RUN_MILLISECONDS) {
+            close_all_alerts
