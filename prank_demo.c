@@ -13,6 +13,7 @@ typedef struct {
     HWND hwnd;
     WNDPROC old_proc;
     DWORD thread_id;
+    HANDLE worker;
     double x, y, vx, vy;
     int slot;
 } DialogState;
@@ -35,39 +36,11 @@ static void close_all_alerts(void)
 static LRESULT CALLBACK moving_dialog_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
     DialogState *state = (DialogState *)GetPropW(hwnd, L"ChillWindowsDialogState");
-    if (msg == WM_TIMER && wp == TIMER_ID && state && !InterlockedCompareExchange(&stopping, 0, 0)) {
-        HWND owner = GetWindow(hwnd, GW_OWNER);
-        if (!owner) owner = app_window;
-        if (owner && IsWindow(owner)) {
-            RECT bounds, wr;
-            GetClientRect(owner, &bounds);
-            POINT origin = { bounds.left, bounds.top };
-            ClientToScreen(owner, &origin);
-            GetWindowRect(hwnd, &wr);
-            int ww = wr.right - wr.left, wh = wr.bottom - wr.top;
-            int max_x = bounds.right - ww;
-            int max_y = bounds.bottom - wh;
-            if (max_x < 0) max_x = 0;
-            if (max_y < 0) max_y = 0;
-
-            state->x += state->vx;
-            state->y += state->vy;
-            if (state->x < 0) { state->x = 0; state->vx = 3.0; }
-            if (state->x > max_x) { state->x = max_x; state->vx = -3.0; }
-            if (state->y < 0) { state->y = 0; state->vy = 2.5; }
-            if (state->y > max_y) { state->y = max_y; state->vy = -2.5; }
-
-            SetWindowPos(hwnd, NULL, origin.x + (int)state->x, origin.y + (int)state->y,
-                         0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-        }
-        return 0;
-    }
     if (msg == WM_KEYDOWN && wp == VK_ESCAPE) {
         close_all_alerts();
         return 0;
     }
     if (msg == WM_NCDESTROY && state) {
-        KillTimer(hwnd, TIMER_ID);
         RemovePropW(hwnd, L"ChillWindowsDialogState");
         if (state->hwnd == hwnd) state->hwnd = NULL;
         if (state->old_proc)
@@ -76,6 +49,42 @@ static LRESULT CALLBACK moving_dialog_proc(HWND hwnd, UINT msg, WPARAM wp, LPARA
     return state && state->old_proc
         ? CallWindowProcW(state->old_proc, hwnd, msg, wp, lp)
         : DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+static DWORD WINAPI dialog_motion_worker(LPVOID parameter)
+{
+    DialogState *state = (DialogState *)parameter;
+    while (!InterlockedCompareExchange(&stopping, 0, 0)) {
+        HWND dialog = state->hwnd;
+        if (!dialog || !IsWindow(dialog)) break;
+
+        HWND owner = GetWindow(dialog, GW_OWNER);
+        if (!owner) owner = app_window;
+        if (!owner || !IsWindow(owner)) break;
+
+        RECT bounds, wr;
+        GetClientRect(owner, &bounds);
+        POINT origin = { bounds.left, bounds.top };
+        ClientToScreen(owner, &origin);
+        GetWindowRect(dialog, &wr);
+        int ww = wr.right - wr.left, wh = wr.bottom - wr.top;
+        int max_x = bounds.right - ww;
+        int max_y = bounds.bottom - wh;
+        if (max_x < 0) max_x = 0;
+        if (max_y < 0) max_y = 0;
+
+        state->x += state->vx;
+        state->y += state->vy;
+        if (state->x < 0) { state->x = 0; state->vx = 3.0; }
+        if (state->x > max_x) { state->x = max_x; state->vx = -3.0; }
+        if (state->y < 0) { state->y = 0; state->vy = 2.5; }
+        if (state->y > max_y) { state->y = max_y; state->vy = -2.5; }
+
+        SetWindowPos(dialog, NULL, origin.x + (int)state->x, origin.y + (int)state->y,
+                     0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        Sleep(30);
+    }
+    return 0;
 }
 
 static LRESULT CALLBACK message_box_hook(int code, WPARAM wp, LPARAM lp)
@@ -109,7 +118,7 @@ static LRESULT CALLBACK message_box_hook(int code, WPARAM wp, LPARAM lp)
         SetPropW(hwnd, L"ChillWindowsDialogState", state);
         state->old_proc = (WNDPROC)SetWindowLongPtrW(hwnd, GWLP_WNDPROC,
                                                      (LONG_PTR)moving_dialog_proc);
-        SetTimer(hwnd, TIMER_ID, 30, NULL);
+        state->worker = CreateThread(NULL, 0, dialog_motion_worker, state, 0, NULL);
         SetWindowPos(hwnd, NULL, origin.x + (int)state->x, origin.y + (int)state->y,
                      0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
     }
@@ -151,8 +160,12 @@ static DWORD WINAPI show_alert(LPVOID parameter)
     const wchar_t *body = texts[state->slot];
     MessageBoxW(app_window, body, L"Chill Windows", MB_OKCANCEL | MB_ICONINFORMATION);
 
+    if (state->worker) {
+        WaitForSingleObject(state->worker, 2000);
+        CloseHandle(state->worker);
+        state->worker = NULL;
+    }
     if (state->hwnd && IsWindow(state->hwnd)) {
-        KillTimer(state->hwnd, TIMER_ID);
         RemovePropW(state->hwnd, L"ChillWindowsDialogState");
         if (state->old_proc)
             SetWindowLongPtrW(state->hwnd, GWLP_WNDPROC, (LONG_PTR)state->old_proc);
