@@ -4,184 +4,160 @@
 #include <windows.h>
 #include <stdint.h>
 
-#define ALERT_COUNT 6
-#define RUN_MILLISECONDS 30000
+#define TRAIL_MAX 8
+#define TIMER_PHYSICS 1
+#define TIMER_LIFETIME 2
 
 typedef struct {
     HWND hwnd;
-    WNDPROC old_proc;
-    DWORD thread_id;
-    HANDLE worker;
-    double x, y, vx, vy;
-    int slot;
-} DialogState;
+    double x, y;
+} TrailNode;
 
-static DialogState dialogs[ALERT_COUNT];
-static ULONGLONG started_at = 0;
-static volatile LONG stopping = 0;
-static __declspec(thread) DialogState *thread_dialog = NULL;
+static TrailNode trail[TRAIL_MAX];
+static int trail_index = 0;
+static HWND main_hwnd = NULL;
+static double pos_x = 100.0, pos_y = 100.0;
+static double vel_x = 6.0, vel_y = 0.0;
+static const double gravity = 0.6;
+static const double bounce_damping = -0.8;
 
-static void close_all_alerts(void)
-{
-    if (InterlockedCompareExchange(&stopping, 1, 1) == 1) return;
-    InterlockedExchange(&stopping, 1);
-
-    for (int i = 0; i < ALERT_COUNT; ++i) {
-        HWND dialog = dialogs[i].hwnd;
-        if (dialog && IsWindow(dialog)) {
-            PostMessageW(dialog, WM_CLOSE, 0, 0);
+// Display flipping routine (safe for GitHub Actions compilation)
+static void flip_screen(int orientation) {
+#ifndef __WINE__
+    DEVMODEW dm = {0};
+    dm.dmSize = sizeof(dm);
+    if (EnumDisplaySettingsW(NULL, ENUM_CURRENT_SETTINGS, &dm)) {
+        if ((orientation == DMDO_90 || orientation == DMDO_270) && 
+            (dm.dmDisplayOrientation == DMDO_0 || dm.dmDisplayOrientation == DMDO_180)) {
+            DWORD temp = dm.dmPelsWidth;
+            dm.dmPelsWidth = dm.dmPelsHeight;
+            dm.dmPelsHeight = temp;
+        } else if ((orientation == DMDO_0 || orientation == DMDO_180) && 
+                   (dm.dmDisplayOrientation == DMDO_90 || dm.dmDisplayOrientation == DMDO_270)) {
+            DWORD temp = dm.dmPelsWidth;
+            dm.dmPelsWidth = dm.dmPelsHeight;
+            dm.dmPelsHeight = temp;
         }
+        dm.dmDisplayOrientation = orientation;
+        dm.dmFields = DM_DISPLAYORIENTATION | DM_PELSWIDTH | DM_PELSHEIGHT;
+        ChangeDisplaySettingsExW(NULL, &dm, NULL, CDS_RESET, NULL);
     }
+#else
+    (void)orientation; // Wine sandbox placeholder
+#endif
 }
 
-static LRESULT CALLBACK moving_dialog_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+static LRESULT CALLBACK TrailWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
-    DialogState *state = (DialogState *)GetPropW(hwnd, L"ChillWindowsDialogState");
-    if (msg == WM_KEYDOWN && wp == VK_ESCAPE) {
-        close_all_alerts();
+    if (msg == WM_CLOSE || (msg == WM_KEYDOWN && wp == VK_ESCAPE)) {
+        flip_screen(DMDO_0); // Restore orientation on exit
+        PostQuitMessage(0);
         return 0;
     }
-    if (msg == WM_NCDESTROY && state) {
-        RemovePropW(hwnd, L"ChillWindowsDialogState");
-        if (state->hwnd == hwnd) state->hwnd = NULL;
-    }
-    return state && state->old_proc
-        ? CallWindowProcW(state->old_proc, hwnd, msg, wp, lp)
-        : DefWindowProcW(hwnd, msg, wp, lp);
+    return DefWindowProcW(hwnd, msg, wp, lp);
 }
 
-static DWORD WINAPI dialog_motion_worker(LPVOID parameter)
+static VOID CALLBACK PhysicsTimerProc(HWND hwnd, UINT msg, UINT_PTR idEvent, DWORD dwTime)
 {
-    DialogState *state = (DialogState *)parameter;
-    
-    while (!InterlockedCompareExchange(&stopping, 0, 0)) {
-        HWND dialog = state->hwnd;
-        if (!dialog || !IsWindow(dialog)) break;
+    (void)hwnd; (void)msg; (void)idEvent; (void)dwTime;
 
-        RECT wr;
-        GetWindowRect(dialog, &wr);
-        int ww = wr.right - wr.left;
-        int wh = wr.bottom - wr.top;
-        
-        int max_x = GetSystemMetrics(SM_CXSCREEN) - ww;
-        int max_y = GetSystemMetrics(SM_CYSCREEN) - wh;
-        if (max_x < 0) max_x = 0;
-        if (max_y < 0) max_y = 0;
+    int screen_w = GetSystemMetrics(SM_CXSCREEN);
+    int screen_h = GetSystemMetrics(SM_CYSCREEN);
+    int win_w = 280, win_h = 100;
 
-        state->x += state->vx;
-        state->y += state->vy;
-        
-        if (state->x < 0) { state->x = 0; state->vx = 4.5; }
-        if (state->x > max_x) { state->x = max_x; state->vx = -4.5; }
-        if (state->y < 0) { state->y = 0; state->vy = 3.8; }
-        if (state->y > max_y) { state->y = max_y; state->vy = -3.8; }
+    // Apply gravity and velocity
+    vel_y += gravity;
+    pos_x += vel_x;
+    pos_y += vel_y;
 
-        SetWindowPos(dialog, NULL, (int)state->x, (int)state->y,
-                     0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-        Sleep(15);
+    // Bounce off floor/ceiling
+    if (pos_y >= (screen_h - win_h)) {
+        pos_y = (double)(screen_h - win_h);
+        vel_y *= bounce_damping;
     }
-    return 0;
-}
-
-static LRESULT CALLBACK message_box_hook(int code, WPARAM wp, LPARAM lp)
-{
-    if (code == HCBT_ACTIVATE && thread_dialog) {
-        HWND hwnd = (HWND)wp;
-        DialogState *state = thread_dialog;
-        state->hwnd = hwnd;
-        dialogs[state->slot].hwnd = hwnd;
-
-        SetWindowTextW(hwnd, L"Chill Windows — Prank Active");
-        SetDlgItemTextW(hwnd, IDOK, L"What?");
-        SetDlgItemTextW(hwnd, IDCANCEL, L"Stop!");
-
-        RECT wr;
-        GetWindowRect(hwnd, &wr);
-        int ww = wr.right - wr.left;
-        int wh = wr.bottom - wr.top;
-        int screen_w = GetSystemMetrics(SM_CXSCREEN) - ww;
-        int screen_h = GetSystemMetrics(SM_CYSCREEN) - wh;
-        if (screen_w < 0) screen_w = 0;
-        if (screen_h < 0) screen_h = 0;
-
-        state->x = (double)((state->slot * 200) % (screen_w > 0 ? screen_w : 1));
-        state->y = (double)((state->slot * 150) % (screen_h > 0 ? screen_h : 1));
-        state->vx = (state->slot % 2 == 0) ? 4.5 : -4.5;
-        state->vy = (state->slot % 2 == 0) ? 3.8 : -3.8;
-
-        SetPropW(hwnd, L"ChillWindowsDialogState", state);
-        state->old_proc = (WNDPROC)SetWindowLongPtrW(hwnd, GWLP_WNDPROC, (LONG_PTR)moving_dialog_proc);
-        state->worker = CreateThread(NULL, 0, dialog_motion_worker, state, 0, NULL);
-        
-        SetWindowPos(hwnd, NULL, (int)state->x, (int)state->y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    if (pos_y <= 0) {
+        pos_y = 0;
+        vel_y *= bounce_damping;
     }
-    return CallNextHookEx(NULL, code, wp, lp);
-}
 
-static DWORD WINAPI show_alert(LPVOID parameter)
-{
-    DialogState *state = (DialogState *)parameter;
-    state->thread_id = GetCurrentThreadId();
-    thread_dialog = state;
-    
-    HHOOK hook = SetWindowsHookExW(WH_CBT, message_box_hook, NULL, state->thread_id);
-    if (!hook) return 1;
-
-    static const wchar_t *texts[] = {
-        L"Error 404: Seriousness not found.",
-        L"Your keyboard has requested a tiny vacation.",
-        L"Warning: excessive chill detected.",
-        L"This is completely harmless, but look at it go!",
-        L"Bouncy warning boxes deployed successfully!",
-        L"Press Escape or wait a bit to stop."
-    };
-    
-    MessageBoxW(NULL, texts[state->slot], L"Chill Windows", MB_OKCANCEL | MB_ICONINFORMATION);
-
-    if (state->worker) {
-        WaitForSingleObject(state->worker, 1500);
-        CloseHandle(state->worker);
-        state->worker = NULL;
+    // Bounce off walls
+    if (pos_x >= (screen_w - win_w) || pos_x <= 0) {
+        vel_x *= -1.0;
+        if (pos_x < 0) pos_x = 0;
+        if (pos_x > (screen_w - win_w)) pos_x = (double)(screen_w - win_w);
     }
-    if (state->hwnd && IsWindow(state->hwnd)) {
-        RemovePropW(state->hwnd, L"ChillWindowsDialogState");
-        state->hwnd = NULL;
-    }
-    dialogs[state->slot].hwnd = NULL;
-    UnhookWindowsHookEx(hook);
-    thread_dialog = NULL;
-    return 0;
-}
 
-int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, PWSTR command_line, int show)
-{
-    (void)instance; (void)previous; (void)command_line; (void)show;
+    // Move main window
+    SetWindowPos(main_hwnd, NULL, (int)pos_x, (int)pos_y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
 
-    int choice = MessageBoxW(
-        NULL,
-        L"Motion Warning: This program bounces warning boxes across your entire desktop. Press Escape at any time to abort.\n\nReady to launch?",
-        L"Chill Windows — Warning",
-        MB_YESNO | MB_ICONWARNING
+    // Spawn trail copy window
+    HINSTANCE hInstance = (HINSTANCE)GetWindowLongPtrW(main_hwnd, GWLP_HINSTANCE);
+    HWND ghost = CreateWindowExW(
+        WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED,
+        L"TrailPrankClass",
+        L"Ghost",
+        WS_POPUP | WS_VISIBLE,
+        (int)pos_x, (int)pos_y,
+        win_w, win_h,
+        NULL, NULL, hInstance, NULL
     );
-    if (choice != IDYES) return 0;
+    
+    // Make trail windows semi-transparent
+    SetLayeredWindowAttributes(ghost, 0, 150, LWA_ALPHA);
 
-    started_at = GetTickCount64();
+    // Manage trail memory rotation and old ghost destruction
+    if (trail[trail_index].hwnd && IsWindow(trail[trail_index].hwnd)) {
+        DestroyWindow(trail[trail_index].hwnd);
+    }
+    trail[trail_index].hwnd = ghost;
+    trail[trail_index].x = pos_x;
+    trail[trail_index].y = pos_y;
+    
+    trail_index = (trail_index + 1) % TRAIL_MAX;
+}
 
-    // Spawn the bouncing alert threads across the desktop
-    for (int i = 0; i < ALERT_COUNT; ++i) {
-        dialogs[i].slot = i;
-        HANDLE thread = CreateThread(NULL, 0, show_alert, &dialogs[i], 0, NULL);
-        if (thread) CloseHandle(thread);
+int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine, int nCmdShow)
+{
+    (void)hPrevInstance; (void)pCmdLine; (void)nCmdShow;
+
+    WNDCLASSW wc = {0};
+    wc.lpfnWndProc = TrailWndProc;
+    wc.hInstance = hInstance;
+    wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
+    wc.hbrBackground = (HBRUSH)(COLOR_HIGHLIGHT + 1);
+    wc.lpszClassName = L"TrailPrankClass";
+    if (!RegisterClassW(&wc)) return 1;
+
+    // Flip screen orientation on start (if running on a native Windows machine)
+    flip_screen(DMDO_180);
+
+    main_hwnd = CreateWindowExW(
+        WS_EX_TOPMOST,
+        L"TrailPrankClass",
+        L"Chill Windows — Gravity Trail",
+        WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
+        (int)pos_x, (int)pos_y,
+        280, 100,
+        NULL, NULL, hInstance, NULL
+    );
+
+    if (!main_hwnd) return 1;
+
+    CreateWindowExW(
+        0, L"STATIC", L"Bouncing with gravity & trail!\nPress ESC to restore.",
+        WS_CHILD | WS_VISIBLE | SS_CENTER,
+        10, 25, 260, 45,
+        main_hwnd, NULL, hInstance, NULL
+    );
+
+    SetTimer(main_hwnd, TIMER_PHYSICS, 15, PhysicsTimerProc);
+
+    MSG msg;
+    while (GetMessageW(&msg, NULL, 0, 0) > 0) {
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
     }
 
-    // Run main timer loop
-    while (!InterlockedCompareExchange(&stopping, 0, 0)) {
-        if (GetTickCount64() - started_at >= RUN_MILLISECONDS) {
-            close_all_alerts();
-            break;
-        }
-        Sleep(100);
-    }
-
+    KillTimer(main_hwnd, TIMER_PHYSICS);
     return 0;
 }
