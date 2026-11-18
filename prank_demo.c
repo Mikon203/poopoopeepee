@@ -116,6 +116,18 @@ static LRESULT CALLBACK message_box_hook(int code, WPARAM wp, LPARAM lp)
     return CallNextHookEx(NULL, code, wp, lp);
 }
 
+static LRESULT CALLBACK message_filter_hook(int code, WPARAM wp, LPARAM lp)
+{
+    if (code == MSGF_DIALOGBOX) {
+        MSG *message = (MSG *)lp;
+        if (message && message->message == WM_KEYDOWN && message->wParam == VK_ESCAPE) {
+            close_all_alerts();
+            return 1;
+        }
+    }
+    return CallNextHookEx(NULL, code, wp, lp);
+}
+
 static DWORD WINAPI show_alert(LPVOID parameter)
 {
     DialogState *state = (DialogState *)parameter;
@@ -123,6 +135,11 @@ static DWORD WINAPI show_alert(LPVOID parameter)
     thread_dialog = state;
     HHOOK hook = SetWindowsHookExW(WH_CBT, message_box_hook, NULL, state->thread_id);
     if (!hook) return 1;
+    HHOOK filter = SetWindowsHookExW(WH_MSGFILTER, message_filter_hook, NULL, state->thread_id);
+    if (!filter) {
+        UnhookWindowsHookEx(hook);
+        return 1;
+    }
 
     static const wchar_t *texts[] = {
         L"Snack levels have reached a mathematically silly value.",
@@ -142,6 +159,7 @@ static DWORD WINAPI show_alert(LPVOID parameter)
         state->hwnd = NULL;
     }
     dialogs[state->slot].hwnd = NULL;
+    UnhookWindowsHookEx(filter);
     UnhookWindowsHookEx(hook);
     thread_dialog = NULL;
     return 0;
