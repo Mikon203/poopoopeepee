@@ -1,17 +1,16 @@
 # Chill Windows
 
-A short, opt-in Windows visual prank simulation written in C. Its opening epilepsy warning is a genuine Windows `MessageBoxW` dialog. Alert windows use normal Windows title bars and close buttons, and their contents are clearly labeled as simulated.
+A short, opt-in Windows joke program written in C. It uses genuine Win32 `MessageBoxW` dialogs for its warning and alerts.
 
 ## What it does
 
 - Shows an epilepsy and motion warning before starting; choose **No** to exit.
-- Runs the animation for 45 seconds at most, with **Escape** available to exit sooner.
-- Cycles slow pastel rainbow bands inside the main app window.
-- Rotates live text inside that window after the opening stage. It does not take screenshots, change display orientation, or cover the desktop.
-- Shows one persistent silly alert and a trail of up to eight extra native Windows windows. Extra alerts bounce with gravity and clear after five seconds.
-- Closing the origin alert stops further spawns. Closing the main window or pressing **Escape** exits.
+- Opens at most five native message boxes. Their buttons read **What?** and **OK!**.
+- Moves the dialogs inside the app window. Choose either button to dismiss a dialog.
+- Press **Escape** or close the main app window to stop the alerts. The run is limited to 45 seconds.
+- Uses no desktop capture, fullscreen overlay, display-orientation change, file changes, startup persistence, or network access.
 
-The alerts are part of the app, not operating-system error reports. It does not alter files or settings, install itself, start at login, or use the network. Run it only on a device you own or with the owner's permission. Do not continue if animated colors or motion may affect you.
+The messages are jokes from this app, not Windows system error reports. Run it only on a device you own or with the owner's permission. Do not continue if motion may affect you.
 
 ## Download
 
