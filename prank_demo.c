@@ -1,12 +1,25 @@
+#ifndef UNICODE
 #define UNICODE
+#endif
+#ifndef _UNICODE
 #define _UNICODE
+#endif
+
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <wingdi.h>
 #include <stdint.h>
+
+// Fallback definitions for screen orientation constants if older SDK headers omit them
+#ifndef DMDO_0
+#define DMDO_0 0
+#define DMDO_90 1
+#define DMDO_180 2
+#define DMDO_270 3
+#endif
 
 #define TRAIL_MAX 8
 #define TIMER_PHYSICS 1
-#define TIMER_LIFETIME 2
 
 typedef struct {
     HWND hwnd;
@@ -21,7 +34,6 @@ static double vel_x = 6.0, vel_y = 0.0;
 static const double gravity = 0.6;
 static const double bounce_damping = -0.8;
 
-// Display flipping routine (safe for GitHub Actions compilation)
 static void flip_screen(int orientation) {
 #ifndef __WINE__
     DEVMODEW dm = {0};
@@ -43,14 +55,14 @@ static void flip_screen(int orientation) {
         ChangeDisplaySettingsExW(NULL, &dm, NULL, CDS_RESET, NULL);
     }
 #else
-    (void)orientation; // Wine sandbox placeholder
+    (void)orientation;
 #endif
 }
 
 static LRESULT CALLBACK TrailWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
     if (msg == WM_CLOSE || (msg == WM_KEYDOWN && wp == VK_ESCAPE)) {
-        flip_screen(DMDO_0); // Restore orientation on exit
+        flip_screen(DMDO_0);
         PostQuitMessage(0);
         return 0;
     }
@@ -65,12 +77,10 @@ static VOID CALLBACK PhysicsTimerProc(HWND hwnd, UINT msg, UINT_PTR idEvent, DWO
     int screen_h = GetSystemMetrics(SM_CYSCREEN);
     int win_w = 280, win_h = 100;
 
-    // Apply gravity and velocity
     vel_y += gravity;
     pos_x += vel_x;
     pos_y += vel_y;
 
-    // Bounce off floor/ceiling
     if (pos_y >= (screen_h - win_h)) {
         pos_y = (double)(screen_h - win_h);
         vel_y *= bounce_damping;
@@ -80,17 +90,14 @@ static VOID CALLBACK PhysicsTimerProc(HWND hwnd, UINT msg, UINT_PTR idEvent, DWO
         vel_y *= bounce_damping;
     }
 
-    // Bounce off walls
     if (pos_x >= (screen_w - win_w) || pos_x <= 0) {
         vel_x *= -1.0;
         if (pos_x < 0) pos_x = 0;
         if (pos_x > (screen_w - win_w)) pos_x = (double)(screen_w - win_w);
     }
 
-    // Move main window
     SetWindowPos(main_hwnd, NULL, (int)pos_x, (int)pos_y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
 
-    // Spawn trail copy window
     HINSTANCE hInstance = (HINSTANCE)GetWindowLongPtrW(main_hwnd, GWLP_HINSTANCE);
     HWND ghost = CreateWindowExW(
         WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED,
@@ -102,10 +109,8 @@ static VOID CALLBACK PhysicsTimerProc(HWND hwnd, UINT msg, UINT_PTR idEvent, DWO
         NULL, NULL, hInstance, NULL
     );
     
-    // Make trail windows semi-transparent
     SetLayeredWindowAttributes(ghost, 0, 150, LWA_ALPHA);
 
-    // Manage trail memory rotation and old ghost destruction
     if (trail[trail_index].hwnd && IsWindow(trail[trail_index].hwnd)) {
         DestroyWindow(trail[trail_index].hwnd);
     }
@@ -128,7 +133,6 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
     wc.lpszClassName = L"TrailPrankClass";
     if (!RegisterClassW(&wc)) return 1;
 
-    // Flip screen orientation on start (if running on a native Windows machine)
     flip_screen(DMDO_180);
 
     main_hwnd = CreateWindowExW(
