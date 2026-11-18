@@ -11,7 +11,6 @@
 #endif
 
 #define TRAIL_MAX 35
-#define TIMER_PHYSICS 1
 
 typedef struct {
     HWND hwnd;
@@ -20,11 +19,7 @@ typedef struct {
 static TrailNode trail[TRAIL_MAX];
 static int trail_index = 0;
 static HWND main_hwnd = NULL;
-static double pos_x = 150.0, pos_y = 50.0;
-static double vel_x = 7.0, vel_y = 0.0;
-static const double gravity = 0.5;
-static const double bounce_damping = -1.0; // Perpetual bounce (never loses speed)
-static int tick_counter = 0;
+static volatile LONG running = 1;
 
 static void flip_screen(int orientation) {
 #ifndef __WINE__
@@ -54,6 +49,7 @@ static void flip_screen(int orientation) {
 static LRESULT CALLBACK PrankWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
     if (msg == WM_CLOSE || (msg == WM_KEYDOWN && wp == VK_ESCAPE)) {
+        InterlockedExchange(&running, 0);
         flip_screen(DMDO_0);
         PostQuitMessage(0);
         return 0;
@@ -61,65 +57,78 @@ static LRESULT CALLBACK PrankWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     return DefWindowProcW(hwnd, msg, wp, lp);
 }
 
-static VOID CALLBACK PhysicsTimerProc(HWND hwnd, UINT msg, UINT_PTR idEvent, DWORD dwTime)
+// Background thread handles physics & trail creation safely away from the message loop
+static DWORD WINAPI PhysicsThreadProc(LPVOID lpParam)
 {
-    (void)hwnd; (void)msg; (void)idEvent; (void)dwTime;
-
-    int screen_w = GetSystemMetrics(SM_CXSCREEN);
-    int screen_h = GetSystemMetrics(SM_CYSCREEN);
-    int win_w = 240, win_h = 80;
-
-    vel_y += gravity;
-    pos_x += vel_x;
-    pos_y += vel_y;
-
-    if (pos_y >= (screen_h - win_h)) {
-        pos_y = (double)(screen_h - win_h);
-        vel_y *= bounce_damping;
-    }
-    if (pos_y <= 0) {
-        pos_y = 0;
-        vel_y *= bounce_damping;
+    (void)lpParam;
+    
+    // Wait for main window to initialize
+    while (!main_hwnd && running) {
+        Sleep(10);
     }
 
-    if (pos_x >= (screen_w - win_w) || pos_x <= 0) {
-        vel_x *= -1.0;
-        if (pos_x < 0) pos_x = 0;
-        if (pos_x > (screen_w - win_w)) pos_x = (double)(screen_w - win_w);
-    }
+    double pos_x = 150.0, pos_y = 50.0;
+    double vel_x = 7.0, vel_y = 0.0;
+    const double gravity = 0.5;
+    const double bounce_damping = -1.0; // Perpetual bounce
 
-    SetWindowPos(main_hwnd, NULL, (int)pos_x, (int)pos_y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    while (running) {
+        int screen_w = GetSystemMetrics(SM_CXSCREEN);
+        int screen_h = GetSystemMetrics(SM_CYSCREEN);
+        int win_w = 240, win_h = 80;
 
-    tick_counter++;
-    if (tick_counter >= 1) {
-        tick_counter = 0;
-        HINSTANCE hInstance = (HINSTANCE)GetWindowLongPtrW(main_hwnd, GWLP_HINSTANCE);
-        
-        HWND ghost = CreateWindowExW(
-            WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
-            L"RealBoxClass",
-            L"Perpetual Trail",
-            WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
-            (int)pos_x, (int)pos_y,
-            win_w, win_h,
-            NULL, NULL, hInstance, NULL
-        );
+        vel_y += gravity;
+        pos_x += vel_x;
+        pos_y += vel_y;
 
-        if (ghost) {
-            CreateWindowExW(
-                0, L"STATIC", L"Never stops bouncing!",
-                WS_CHILD | WS_VISIBLE | SS_CENTER,
-                10, 18, 220, 25,
-                ghost, NULL, hInstance, NULL
+        if (pos_y >= (screen_h - win_h)) {
+            pos_y = (double)(screen_h - win_h);
+            vel_y *= bounce_damping;
+        }
+        if (pos_y <= 0) {
+            pos_y = 0;
+            vel_y *= bounce_damping;
+        }
+
+        if (pos_x >= (screen_w - win_w) || pos_x <= 0) {
+            vel_x *= -1.0;
+            if (pos_x < 0) pos_x = 0;
+            if (pos_x > (screen_w - win_w)) pos_x = (double)(screen_w - win_w);
+        }
+
+        if (main_hwnd && IsWindow(main_hwnd)) {
+            SetWindowPos(main_hwnd, NULL, (int)pos_x, (int)pos_y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+
+            HINSTANCE hInstance = (HINSTANCE)GetWindowLongPtrW(main_hwnd, GWLP_HINSTANCE);
+            HWND ghost = CreateWindowExW(
+                WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+                L"RealBoxClass",
+                L"Perpetual Trail",
+                WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
+                (int)pos_x, (int)pos_y,
+                win_w, win_h,
+                NULL, NULL, hInstance, NULL
             );
 
-            if (trail[trail_index].hwnd && IsWindow(trail[trail_index].hwnd)) {
-                DestroyWindow(trail[trail_index].hwnd);
+            if (ghost) {
+                CreateWindowExW(
+                    0, L"STATIC", L"Never stops bouncing!",
+                    WS_CHILD | WS_VISIBLE | SS_CENTER,
+                    10, 18, 220, 25,
+                    ghost, NULL, hInstance, NULL
+                );
+
+                if (trail[trail_index].hwnd && IsWindow(trail[trail_index].hwnd)) {
+                    DestroyWindow(trail[trail_index].hwnd);
+                }
+                trail[trail_index].hwnd = ghost;
+                trail_index = (trail_index + 1) % TRAIL_MAX;
             }
-            trail[trail_index].hwnd = ghost;
-            trail_index = (trail_index + 1) % TRAIL_MAX;
         }
+
+        Sleep(15);
     }
+    return 0;
 }
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine, int nCmdShow)
@@ -134,6 +143,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
     wc.lpszClassName = L"RealBoxClass";
     if (!RegisterClassW(&wc)) return 1;
 
+    // Flip screen display on startup
     flip_screen(DMDO_180);
 
     main_hwnd = CreateWindowExW(
@@ -141,7 +151,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
         L"RealBoxClass",
         L"Chill Windows — Perpetual Trail",
         WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
-        (int)pos_x, (int)pos_y,
+        150, 50,
         240, 80,
         NULL, NULL, hInstance, NULL
     );
@@ -155,7 +165,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
         main_hwnd, NULL, hInstance, NULL
     );
 
-    SetTimer(main_hwnd, TIMER_PHYSICS, 15, PhysicsTimerProc);
+    // Start background physics thread safely
+    HANDLE hThread = CreateThread(NULL, 0, PhysicsThreadProc, NULL, 0, NULL);
 
     MSG msg;
     while (GetMessageW(&msg, NULL, 0, 0) > 0) {
@@ -163,7 +174,11 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
         DispatchMessageW(&msg);
     }
 
-    KillTimer(main_hwnd, TIMER_PHYSICS);
+    InterlockedExchange(&running, 0);
+    if (hThread) {
+        WaitForSingleObject(hThread, 1000);
+        CloseHandle(hThread);
+    }
     
     for (int i = 0; i < TRAIL_MAX; ++i) {
         if (trail[i].hwnd && IsWindow(trail[i].hwnd)) {
