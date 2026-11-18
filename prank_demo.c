@@ -165,8 +165,10 @@ static LRESULT CALLBACK app_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         SetTimer(hwnd, TIMER_ID, 250, NULL);
         return 0;
     case WM_TIMER:
-        if (wp == TIMER_ID && GetTickCount64() - started_at >= RUN_MILLISECONDS)
+        if (wp == TIMER_ID && GetTickCount64() - started_at >= RUN_MILLISECONDS) {
             close_all_alerts();
+            DestroyWindow(hwnd);
+        }
         return 0;
     case WM_KEYDOWN:
         if (wp == VK_ESCAPE) {
