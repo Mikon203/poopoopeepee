@@ -49,17 +49,22 @@ static double seconds_since_start(void)
     return (GetTickCount64() - started_at) / 1000.0;
 }
 
-static void add_card(int origin)
+static void add_card(HWND hwnd, int origin)
 {
-    if (card_count >= MAX_CARDS) return;
+    int slot = -1;
+    for (int i = 0; i < card_count; ++i) {
+        if (!cards[i].alive) { slot = i; break; }
+    }
+    if (slot < 0 && card_count < MAX_CARDS) slot = card_count++;
+    if (slot < 0) return;
     RECT rc;
-    GetClientRect(GetActiveWindow(), &rc);
+    GetClientRect(hwnd, &rc);
     int cw = rc.right - rc.left;
     int ch = rc.bottom - rc.top;
     if (cw < CARD_W + 20 || ch < CARD_H + 20) return;
 
     unsigned int seed = (unsigned int)GetTickCount64() ^ (unsigned int)(card_count * 2654435761u);
-    Card *c = &cards[card_count++];
+    Card *c = &cards[slot];
     c->x = 15 + (seed % (unsigned int)(cw - CARD_W - 15));
     c->y = 70 + ((seed >> 8) % (unsigned int)(ch - CARD_H - 70));
     c->vx = (double)((int)((seed >> 16) % 241) - 120);
@@ -220,7 +225,7 @@ static void update_scene(HWND hwnd)
         int live = 0;
         for (int i = 0; i < card_count; ++i)
             if (cards[i].alive && !cards[i].origin) ++live;
-        if (live < 8) add_card(0);
+        if (live < 8) add_card(hwnd, 0);
         last_spawn = now;
     }
 
@@ -234,7 +239,7 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         started_at = GetTickCount64();
         last_tick = started_at;
         last_spawn = started_at;
-        add_card(1);
+        add_card(hwnd, 1);
         SetTimer(hwnd, TIMER_ID, 33, NULL);
         return 0;
     case WM_TIMER:
