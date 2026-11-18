@@ -21,35 +21,10 @@ static ULONGLONG started_at = 0;
 static volatile LONG stopping = 0;
 static __declspec(thread) DialogState *thread_dialog = NULL;
 
-// Function to flip or reset the screen orientation
-static void flip_screen(int orientation) {
-    DEVMODEW dm = {0};
-    dm.dmSize = sizeof(dm);
-    if (EnumDisplaySettingsW(NULL, ENUM_CURRENT_SETTINGS, &dm)) {
-        if ((orientation == DMDO_90 || orientation == DMDO_270) && 
-            (dm.dmDisplayOrientation == DMDO_0 || dm.dmDisplayOrientation == DMDO_180)) {
-            DWORD temp = dm.dmPelsWidth;
-            dm.dmPelsWidth = dm.dmPelsHeight;
-            dm.dmPelsHeight = temp;
-        } else if ((orientation == DMDO_0 || orientation == DMDO_180) && 
-                   (dm.dmDisplayOrientation == DMDO_90 || dm.dmDisplayOrientation == DMDO_270)) {
-            DWORD temp = dm.dmPelsWidth;
-            dm.dmPelsWidth = dm.dmPelsHeight;
-            dm.dmPelsHeight = temp;
-        }
-        dm.dmDisplayOrientation = orientation;
-        dm.dmFields = DM_DISPLAYORIENTATION | DM_PELSWIDTH | DM_PELSHEIGHT;
-        ChangeDisplaySettingsExW(NULL, &dm, NULL, CDS_RESET, NULL);
-    }
-}
-
 static void close_all_alerts(void)
 {
     if (InterlockedCompareExchange(&stopping, 1, 1) == 1) return;
     InterlockedExchange(&stopping, 1);
-    
-    // Immediately restore display back to normal
-    flip_screen(DMDO_0);
 
     for (int i = 0; i < ALERT_COUNT; ++i) {
         HWND dialog = dialogs[i].hwnd;
@@ -129,7 +104,6 @@ static LRESULT CALLBACK message_box_hook(int code, WPARAM wp, LPARAM lp)
         if (screen_w < 0) screen_w = 0;
         if (screen_h < 0) screen_h = 0;
 
-        // Spread out initial starting positions
         state->x = (double)((state->slot * 200) % (screen_w > 0 ? screen_w : 1));
         state->y = (double)((state->slot * 150) % (screen_h > 0 ? screen_h : 1));
         state->vx = (state->slot % 2 == 0) ? 4.5 : -4.5;
@@ -154,12 +128,12 @@ static DWORD WINAPI show_alert(LPVOID parameter)
     if (!hook) return 1;
 
     static const wchar_t *texts[] = {
-        L"Your screen decided to do a cartwheel.",
-        L"Error 404: Gravity temporarily unavailable.",
-        L"Too much chill detected on the primary display.",
+        L"Error 404: Seriousness not found.",
+        L"Your keyboard has requested a tiny vacation.",
+        L"Warning: excessive chill detected.",
         L"This is completely harmless, but look at it go!",
-        L"Mikon203 special delivery: bouncy boxes!",
-        L"Press Escape or wait a bit to restore order."
+        L"Bouncy warning boxes deployed successfully!",
+        L"Press Escape or wait a bit to stop."
     };
     
     MessageBoxW(NULL, texts[state->slot], L"Chill Windows", MB_OKCANCEL | MB_ICONINFORMATION);
@@ -185,7 +159,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, PWSTR command_line, 
 
     int choice = MessageBoxW(
         NULL,
-        L"Motion Prank Warning: This program flips your display upside down and bounces windows across your entire desktop. Press Escape at any time to abort.\n\nReady to launch?",
+        L"Motion Warning: This program bounces warning boxes across your entire desktop. Press Escape at any time to abort.\n\nReady to launch?",
         L"Chill Windows — Warning",
         MB_YESNO | MB_ICONWARNING
     );
@@ -193,10 +167,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, PWSTR command_line, 
 
     started_at = GetTickCount64();
 
-    // Flip screen upside down immediately on start
-    flip_screen(DMDO_180);
-
-    // Spawn the bouncing alert threads
+    // Spawn the bouncing alert threads across the desktop
     for (int i = 0; i < ALERT_COUNT; ++i) {
         dialogs[i].slot = i;
         HANDLE thread = CreateThread(NULL, 0, show_alert, &dialogs[i], 0, NULL);
@@ -206,4 +177,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, PWSTR command_line, 
     // Run main timer loop
     while (!InterlockedCompareExchange(&stopping, 0, 0)) {
         if (GetTickCount64() - started_at >= RUN_MILLISECONDS) {
-            close_all_alerts
+            close_all_alerts();
+            break;
+        }
+        Sleep(100);
+    }
+
+    return 0;
+}
